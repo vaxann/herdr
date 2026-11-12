@@ -2530,7 +2530,7 @@ fn mobile_foreign_agent_and_workspace_targets_activate_their_endpoint() {
         .snapshot
         .as_mut()
         .expect("remote snapshot")
-        .agents = vec![agent("remote agent", AgentStatus::Working, 2)];
+        .agents = vec![agent("remote agent", AgentStatus::Blocked, 2)];
     state.mode = ClientShellMode::Navigate;
     state.compose(44, 30).expect("mobile switcher");
     let remote_agent = state

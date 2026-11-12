@@ -95,8 +95,9 @@ fn mobile_switcher_can_activate_an_online_saved_machine() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(text.contains("machines"));
-    assert!(text.contains("Build"));
+    assert!(text.contains("spaces"));
+    assert!(text.contains("Build · online"), "frame: {text}");
+    assert!(!text.contains("machines"), "frame: {text}");
     let machine = state
         .hits
         .mobile_targets
@@ -253,7 +254,7 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
     for expected in [
         "switch",
         "close",
-        "agents",
+        "attention",
         "spaces",
         "+ new workspace",
         "tabs",
@@ -671,4 +672,351 @@ fn mobile_switcher_scroll_close_and_width_transition_clear_mobile_hits() {
     assert_eq!(short.cells[0].symbol, "─");
     assert!(state.hits.mobile_close.is_empty());
     assert!(state.hits.mobile_targets.is_empty());
+}
+
+fn mobile_frame_lines(frame: &FrameData) -> Vec<String> {
+    frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn mobile_agent(pane_id: &str, workspace_id: &str, status: AgentStatus) -> ClientShellAgent {
+    ClientShellAgent {
+        pane_id: pane_id.into(),
+        workspace_id: workspace_id.into(),
+        tab_id: "tab_1".into(),
+        name: Some(pane_id.into()),
+        display_agent: Some("pi".into()),
+        agent: Some("pi".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: status,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: false,
+    }
+}
+
+fn mobile_workspace(workspace_id: &str, label: &str) -> ClientShellWorkspace {
+    ClientShellWorkspace {
+        workspace_id: workspace_id.into(),
+        active_tab_id: format!("tab_{workspace_id}"),
+        new_workspace_cwd: "/tmp".into(),
+        number: 1,
+        label: label.into(),
+        custom_label: true,
+        branch: None,
+        git_ahead_behind: None,
+        tokens: Vec::new(),
+        worktree: None,
+        focused: false,
+        agent_status: AgentStatus::Idle,
+    }
+}
+
+fn mobile_agent_targets(state: &ClientShellState) -> Vec<String> {
+    state
+        .hits
+        .mobile_targets
+        .iter()
+        .filter_map(|(_, target)| match target {
+            ClientMobileTarget::Agent { pane_id, .. } => Some(pane_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn mobile_workspace_targets(state: &ClientShellState) -> Vec<(ClientEndpointId, String)> {
+    state
+        .hits
+        .mobile_targets
+        .iter()
+        .filter_map(|(_, target)| match target {
+            ClientMobileTarget::Workspace {
+                endpoint_id,
+                workspace_id,
+            } => Some((endpoint_id.clone(), workspace_id.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Local (active, with a worktree group), an online `Build` machine and a
+/// reconnecting `Jump` machine whose snapshot is cached.
+fn three_machine_state() -> (ClientShellState, ClientEndpointId, ClientEndpointId) {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let profile = |id: &str, label: &str| crate::client::endpoint::SavedSshEndpoint {
+        id: crate::client::endpoint::ProfileId::parse(id).unwrap(),
+        label: label.into(),
+        target: label.to_lowercase(),
+        session: "agents".into(),
+        enabled: true,
+    };
+    let build = profile("0123456789abcdef0123456789abcdef", "Build");
+    let jump = profile("fedcba9876543210fedcba9876543210", "Jump");
+    let build_id = ClientEndpointId::Ssh(build.id.clone());
+    let jump_id = ClientEndpointId::Ssh(jump.id.clone());
+    state.set_endpoint_catalog(&[build, jump]);
+    state.set_endpoint_status(&build_id, ClientEndpointStatus::Online);
+    state.set_endpoint_status(&jump_id, ClientEndpointStatus::Online);
+
+    let mut local = snapshot();
+    local.workspaces[0].worktree = Some(ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: false,
+    });
+    let mut feature = mobile_workspace("ws_2", "repo-feature");
+    feature.custom_label = false;
+    feature.branch = Some("worktree/feature".into());
+    feature.worktree = Some(ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: true,
+    });
+    local.workspaces.push(feature);
+    let mut fix = mobile_workspace("ws_3", "repo-fix");
+    fix.custom_label = false;
+    fix.branch = Some("worktree/fix".into());
+    fix.worktree = Some(ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: true,
+    });
+    local.workspaces.push(fix);
+    local.workspaces.push(mobile_workspace("ws_4", "notes"));
+    state.set_snapshot(Box::new(local));
+    state.set_pane_surface(surface());
+
+    let mut remote = snapshot();
+    remote.boot_id = "build-boot".into();
+    remote.workspaces[0].label = "api".into();
+    remote.workspaces[0].custom_label = true;
+    remote.workspaces[0].focused = false;
+    remote.workspaces.push(mobile_workspace("ws_2", "web"));
+    state.set_endpoint_snapshot(&build_id, Box::new(remote));
+
+    let mut cached = snapshot();
+    cached.boot_id = "jump-boot".into();
+    cached.workspaces[0].label = "ops".into();
+    cached.workspaces[0].custom_label = true;
+    cached.workspaces[0].focused = false;
+    state.set_endpoint_snapshot(&jump_id, Box::new(cached));
+    state.set_endpoint_status(&jump_id, ClientEndpointStatus::Reconnecting);
+
+    for endpoint in &mut state.endpoints {
+        let Some(snapshot) = endpoint.snapshot.as_mut() else {
+            continue;
+        };
+        if endpoint.endpoint_id == build_id {
+            snapshot.agents = vec![
+                mobile_agent("pane_1", "ws_1", AgentStatus::Blocked),
+                mobile_agent("pane_2", "ws_2", AgentStatus::Working),
+            ];
+        } else if endpoint.endpoint_id.is_local() {
+            snapshot.agents = vec![
+                mobile_agent("pane_1", "ws_1", AgentStatus::Done),
+                mobile_agent("pane_9", "ws_4", AgentStatus::Idle),
+            ];
+        }
+    }
+    (state, build_id, jump_id)
+}
+
+#[test]
+fn mobile_switcher_lists_only_agents_that_need_attention() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let set_agents = |state: &mut ClientShellState, agents: Vec<ClientShellAgent>| {
+        state.endpoints[0]
+            .snapshot
+            .as_mut()
+            .expect("local snapshot")
+            .agents = agents;
+    };
+    set_agents(
+        &mut state,
+        vec![
+            mobile_agent("pane_1", "ws_1", AgentStatus::Blocked),
+            mobile_agent("pane_2", "ws_1", AgentStatus::Working),
+            mobile_agent("pane_3", "ws_1", AgentStatus::Idle),
+            mobile_agent("pane_4", "ws_1", AgentStatus::Done),
+            mobile_agent("pane_5", "ws_1", AgentStatus::Unknown),
+        ],
+    );
+    state.mode = ClientShellMode::Navigate;
+    let frame = state.compose(44, 40).expect("attention switcher");
+    let lines = mobile_frame_lines(&frame);
+    let text = lines.join("\n");
+    let mut agents = mobile_agent_targets(&state);
+    agents.sort();
+    assert_eq!(agents, ["pane_1", "pane_4"], "{text}");
+    let attention = lines
+        .iter()
+        .position(|line| line.trim() == "attention")
+        .expect("attention section");
+    let spaces = lines
+        .iter()
+        .position(|line| line.trim() == "spaces")
+        .expect("spaces section");
+    assert!(attention < spaces, "{text}");
+    // A single machine keeps rows unprefixed and has no machine row.
+    assert!(!text.contains("Local"), "{text}");
+
+    set_agents(
+        &mut state,
+        vec![
+            mobile_agent("pane_2", "ws_1", AgentStatus::Working),
+            mobile_agent("pane_3", "ws_1", AgentStatus::Idle),
+        ],
+    );
+    let frame = state.compose(44, 40).expect("quiet switcher");
+    let text = mobile_frame_lines(&frame).join("\n");
+    assert!(mobile_agent_targets(&state).is_empty(), "{text}");
+    assert!(!text.contains("attention"), "{text}");
+
+    // An active agent view keeps its label visible even when nothing matches.
+    let mut viewed = snapshot();
+    viewed.agent_view_label = Some("focus".into());
+    state.set_snapshot(Box::new(viewed));
+    set_agents(
+        &mut state,
+        vec![mobile_agent("pane_2", "ws_1", AgentStatus::Working)],
+    );
+    let frame = state.compose(44, 40).expect("view switcher");
+    let text = mobile_frame_lines(&frame).join("\n");
+    assert!(text.contains("attention · focus"), "{text}");
+    assert!(text.contains("no agents need attention"), "{text}");
+}
+
+#[test]
+fn mobile_switcher_renders_machine_space_worktree_tree() {
+    let (mut state, build_id, jump_id) = three_machine_state();
+    state.mode = ClientShellMode::Navigate;
+    let frame = state.compose(52, 60).expect("tree switcher");
+    let lines = mobile_frame_lines(&frame);
+    let text = lines.join("\n");
+    if std::env::var_os("HERDR_PRINT_MOBILE_TREE").is_some() {
+        eprintln!("{text}");
+    }
+    let row = |needle: &str| {
+        lines
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle:?} in\n{text}"))
+    };
+    let expected = [
+        "attention",
+        // Blocked leads, then done-not-seen.
+        "● Build · api",
+        "blocked · pi",
+        "● Local · client-shell",
+        "done · pi",
+        "spaces",
+        "+ new workspace",
+        "● Local · online",
+        "├─ ○ client-shell",
+        "│  main · tab 1",
+        "│  ├─ ○ feature",
+        "│  │    worktree/feature · tab 1",
+        "│  └─ ○ fix",
+        "│       worktree/fix · tab 1",
+        "└─ ○ notes",
+        "● Build · online",
+        "├─ ○ api",
+        "└─ ○ web",
+        "◐ Jump · reconnecting",
+        "└─ ○ ops",
+        "tabs",
+        "menu",
+    ];
+    let mut previous = 0;
+    for needle in expected {
+        let index = row(needle);
+        assert!(index >= previous, "{needle:?} out of order in\n{text}");
+        previous = index;
+    }
+    // Space rows no longer carry a `machine ·` prefix; the working agent on
+    // Build and the idle one on Local are not attention items.
+    assert!(!text.contains("Build · web"), "{text}");
+    assert!(!text.contains("machines"), "{text}");
+    let mut agents = mobile_agent_targets(&state);
+    agents.sort();
+    assert_eq!(agents, ["pane_1", "pane_1"], "{text}");
+
+    // Machine rows stay tappable and keep their Machine target.
+    for endpoint_id in [&ClientEndpointId::Local, &build_id, &jump_id] {
+        assert!(
+            state.hits.mobile_targets.iter().any(
+                |(_, target)| matches!(target, ClientMobileTarget::Machine(id) if id == endpoint_id)
+            ),
+            "missing machine target for {endpoint_id:?}"
+        );
+    }
+
+    // The reconnecting machine's spaces are dimmed.
+    let buffer = frame.to_ratatui_buffer().expect("tree buffer");
+    let ops = state
+        .hits
+        .mobile_targets
+        .iter()
+        .find_map(|(rect, target)| {
+            matches!(
+                target,
+                ClientMobileTarget::Workspace { endpoint_id, .. } if endpoint_id == &jump_id
+            )
+            .then_some(*rect)
+        })
+        .expect("cached jump workspace");
+    assert_eq!(
+        buffer[(ops.x, ops.y)].fg,
+        state.config.palette.overlay0,
+        "{text}"
+    );
+}
+
+#[test]
+fn mobile_tree_keyboard_order_matches_rendered_workspace_order() {
+    let (mut state, _build_id, jump_id) = three_machine_state();
+    state.compose(52, 60).expect("mobile header");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: state.hits.mobile_switch.x,
+        row: state.hits.mobile_switch.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+    state.compose(52, 60).expect("mobile switcher");
+    // Keyboard navigation skips machines that are not online.
+    let rendered = mobile_workspace_targets(&state)
+        .into_iter()
+        .filter(|(endpoint_id, _)| endpoint_id != &jump_id)
+        .collect::<Vec<_>>();
+    assert_eq!(rendered.len(), 6);
+
+    let mut visited = Vec::new();
+    for _ in 0..rendered.len() {
+        let selected = state
+            .navigate_workspace_id
+            .clone()
+            .expect("selected workspace");
+        visited.push((selected.endpoint_id.clone(), selected.workspace_id.clone()));
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Down,
+            KeyModifiers::empty(),
+        ))]);
+        state.compose(52, 60).expect("moved selection");
+    }
+    assert_eq!(visited, rendered);
 }

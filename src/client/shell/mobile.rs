@@ -572,6 +572,49 @@ fn render_close_button(buffer: &mut Buffer, area: Rect, palette: &Palette) {
     }
 }
 
+fn mobile_agent_needs_attention(status: crate::api::schema::AgentStatus) -> bool {
+    matches!(
+        status,
+        crate::api::schema::AgentStatus::Blocked | crate::api::schema::AgentStatus::Done
+    )
+}
+
+fn mobile_machine_item(
+    endpoint: &ClientShellEndpoint,
+    palette: &Palette,
+    content_width: u16,
+) -> MobileItem {
+    let background = palette.panel_bg;
+    let (symbol, state, color) = endpoint_status_presentation(endpoint.status, palette);
+    let online = endpoint.status == ClientEndpointStatus::Online;
+    let state = format!(" · {state}");
+    let label_width = content_width
+        .saturating_sub(5)
+        .saturating_sub(display_width(&state));
+    MobileItem {
+        lines: vec![Line::from(vec![
+            Span::styled("  ", Style::default().bg(background)),
+            Span::styled(symbol, Style::default().fg(color).bg(background)),
+            Span::styled(" ", Style::default().bg(background)),
+            Span::styled(
+                crate::ui::truncate_end(&endpoint.label, usize::from(label_width)),
+                Style::default()
+                    .fg(palette.text)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                state,
+                Style::default()
+                    .fg(if online { palette.overlay0 } else { color })
+                    .bg(background),
+            ),
+        ])],
+        background,
+        target: Some(ClientMobileTarget::Machine(endpoint.endpoint_id.clone())),
+    }
+}
+
 fn mobile_items(
     snapshot: &ClientShellSnapshot,
     endpoints: &[ClientShellEndpoint],
@@ -582,49 +625,37 @@ fn mobile_items(
 ) -> Vec<MobileItem> {
     let palette = &config.palette;
     let mut items = Vec::new();
-    if endpoints.len() > 1 {
-        items.push(MobileItem::section("machines", palette));
-        for endpoint in endpoints {
-            let background = palette.panel_bg;
-            let (symbol, state, color) = endpoint_status_presentation(endpoint.status, palette);
-            items.push(MobileItem {
-                lines: vec![
-                    Line::from(vec![
-                        Span::styled("  ", Style::default().bg(background)),
-                        Span::styled(symbol, Style::default().fg(color).bg(background)),
-                        Span::styled(
-                            format!(" {}", endpoint.label),
-                            Style::default()
-                                .fg(palette.text)
-                                .bg(background)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(Span::styled(
-                        format!("    {state}"),
-                        Style::default().fg(palette.overlay0).bg(background),
-                    )),
-                ],
-                background,
-                target: Some(ClientMobileTarget::Machine(endpoint.endpoint_id.clone())),
-            });
-        }
-    }
-    let agents = super::aggregate_navigation::aggregate_agent_rows(
+    let federated = endpoints.len() > 1;
+    // Only agents that need the user: blocked ones and finished ones the user
+    // has not looked at yet. The client projection already turns acknowledged
+    // completions back into `Idle`, so `Done` here means "done, not seen".
+    // Filtering happens after the active agent view (`agent.view.set`) and the
+    // configured sort, so both keep shaping this list.
+    let mut agents = super::aggregate_navigation::aggregate_agent_rows(
         endpoints,
         active_endpoint_id,
         config.agent_panel_sort,
-    );
+    )
+    .into_iter()
+    .filter(|row| mobile_agent_needs_attention(row.agent.agent_status))
+    .collect::<Vec<_>>();
     let agent_view_label = snapshot.agent_view_label.as_deref();
+    if agent_view_label.is_none() {
+        // Blocked agents wait on the user, so they lead. The sort is stable and
+        // keeps the configured order inside each group; an agent view keeps
+        // its own ordering untouched.
+        agents
+            .sort_by_key(|row| row.agent.agent_status != crate::api::schema::AgentStatus::Blocked);
+    }
     if !agents.is_empty() || agent_view_label.is_some() {
         let title = agent_view_label
-            .map(|label| format!("agents · {label}"))
-            .unwrap_or_else(|| "agents".to_owned());
+            .map(|label| format!("attention · {label}"))
+            .unwrap_or_else(|| "attention".to_owned());
         items.push(MobileItem::section(title, palette));
         if agents.is_empty() {
             items.push(MobileItem {
                 lines: vec![Line::from(Span::styled(
-                    "  no matching agents",
+                    "  no agents need attention",
                     Style::default()
                         .fg(palette.overlay0)
                         .bg(palette.panel_bg)
@@ -718,7 +749,11 @@ fn mobile_items(
                         Span::styled(" ", Style::default().bg(background)),
                         Span::styled(
                             crate::ui::truncate_end(
-                                &format!("{} · {primary}", endpoint.label),
+                                &if federated {
+                                    format!("{} · {primary}", endpoint.label)
+                                } else {
+                                    primary.to_owned()
+                                },
                                 usize::from(content_width.saturating_sub(5)),
                             ),
                             Style::default()
@@ -753,13 +788,25 @@ fn mobile_items(
         ClientMobileTarget::NewWorkspace,
         palette,
     ));
-    for endpoint in super::aggregate_navigation::cached_endpoint_snapshots(endpoints) {
-        for entry in super::render::workspace_entries(endpoint.snapshot, &HashSet::new()) {
-            let Some(workspace) = endpoint.snapshot.workspaces.get(entry.index) else {
+    // Machine → workspace → worktree tree. With a single machine the machine
+    // row and its tree column are omitted, so Local-only users see the same
+    // flat workspace list as before.
+    for endpoint in endpoints {
+        let stale = endpoint.status != ClientEndpointStatus::Online;
+        if federated {
+            items.push(mobile_machine_item(endpoint, palette, content_width));
+        }
+        let Some(endpoint_snapshot) = endpoint.snapshot.as_deref() else {
+            continue;
+        };
+        let entries = super::render::workspace_entries(endpoint_snapshot, &HashSet::new());
+        let last_root = entries.iter().rposition(|entry| !entry.indented);
+        for (position, entry) in entries.iter().enumerate() {
+            let Some(workspace) = endpoint_snapshot.workspaces.get(entry.index) else {
                 continue;
             };
             let selected = selected_workspace_id.is_some_and(|target| {
-                target.matches(endpoint.endpoint_id, &workspace.workspace_id)
+                target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
             });
             let background = if selected {
                 if palette.surface0 == ratatui::style::Color::Reset {
@@ -767,7 +814,7 @@ fn mobile_items(
                 } else {
                     palette.surface0
                 }
-            } else if endpoint.endpoint_id == active_endpoint_id && workspace.focused {
+            } else if &endpoint.endpoint_id == active_endpoint_id && workspace.focused {
                 if selected_workspace_id.is_some()
                     && palette.surface0 == ratatui::style::Color::Reset
                 {
@@ -778,14 +825,30 @@ fn mobile_items(
             } else {
                 palette.panel_bg
             };
-            let connector = if entry.indented {
-                if entry.last_child {
-                    "└─ "
+            // Column 1: the machine branch. Roots draw `├─`/`└─`; worktree
+            // children only continue the vertical line while more roots follow.
+            let (machine_head, machine_tail) = if !federated {
+                ("", "")
+            } else if entry.indented {
+                if last_root.is_some_and(|last| last < position) {
+                    ("   ", "   ")
                 } else {
-                    "├─ "
+                    ("│  ", "│  ")
+                }
+            } else if Some(position) == last_root {
+                ("└─ ", "   ")
+            } else {
+                ("├─ ", "│  ")
+            };
+            // Column 2: the worktree branch under its group root.
+            let (worktree_head, worktree_tail) = if entry.indented {
+                if entry.last_child {
+                    ("└─ ", "     ")
+                } else {
+                    ("├─ ", "│    ")
                 }
             } else {
-                ""
+                ("", "")
             };
             let name = if entry.indented && !workspace.custom_label {
                 workspace
@@ -797,40 +860,36 @@ fn mobile_items(
                 &workspace.label
             };
             let branch = workspace.branch.as_deref().unwrap_or("shell");
-            let detail_prefix = if entry.indented {
-                if entry.last_child {
-                    "       "
-                } else {
-                    "  │    "
-                }
-            } else {
-                "  "
-            };
-            let dim = if endpoint.stale() {
+            let dim = if stale {
                 Modifier::DIM
             } else {
                 Modifier::empty()
             };
-            let foreground = if endpoint.stale() {
+            let foreground = if stale {
                 palette.overlay0
             } else {
                 palette.text
             };
-            let status = if endpoint.stale() {
+            let status = if stale {
                 palette.overlay0
             } else {
                 status_color(workspace.agent_status, palette)
             };
-            let stale_detail = if endpoint.stale() {
+            // The machine row already carries the connection state.
+            let stale_detail = if stale && !federated {
                 format!(" · {}", mobile_endpoint_state(endpoint.status))
             } else {
                 String::new()
             };
+            let head = format!("  {machine_head}{worktree_head}");
+            let name_width = content_width.saturating_sub(display_width(&head).saturating_add(3));
+            let tail = format!("  {machine_tail}{worktree_tail}");
+            let detail_width = content_width.saturating_sub(display_width(&tail));
             items.push(MobileItem {
                 lines: vec![
                     Line::from(vec![
                         Span::styled(
-                            format!("  {connector}"),
+                            head,
                             Style::default()
                                 .fg(palette.overlay0)
                                 .bg(background)
@@ -842,33 +901,35 @@ fn mobile_items(
                         ),
                         Span::styled(" ", Style::default().bg(background)),
                         Span::styled(
-                            crate::ui::truncate_end(
-                                &format!("{} · {name}", endpoint.label),
-                                usize::from(content_width.saturating_sub(if entry.indented {
-                                    8
-                                } else {
-                                    5
-                                })),
-                            ),
+                            crate::ui::truncate_end(name, usize::from(name_width)),
                             Style::default()
                                 .fg(foreground)
                                 .bg(background)
                                 .add_modifier(Modifier::BOLD | dim),
                         ),
                     ]),
-                    Line::from(Span::styled(
-                        crate::ui::truncate_end(
-                            &format!(
-                                "{detail_prefix}{branch} · {}{stale_detail}",
-                                compact_tab_status(endpoint.snapshot, workspace)
-                            ),
-                            usize::from(content_width),
+                    Line::from(vec![
+                        Span::styled(
+                            tail,
+                            Style::default()
+                                .fg(palette.overlay0)
+                                .bg(background)
+                                .add_modifier(dim),
                         ),
-                        Style::default()
-                            .fg(palette.overlay0)
-                            .bg(background)
-                            .add_modifier(dim),
-                    )),
+                        Span::styled(
+                            crate::ui::truncate_end(
+                                &format!(
+                                    "{branch} · {}{stale_detail}",
+                                    compact_tab_status(endpoint_snapshot, workspace)
+                                ),
+                                usize::from(detail_width),
+                            ),
+                            Style::default()
+                                .fg(palette.overlay0)
+                                .bg(background)
+                                .add_modifier(dim),
+                        ),
+                    ]),
                 ],
                 background,
                 target: Some(ClientMobileTarget::Workspace {
