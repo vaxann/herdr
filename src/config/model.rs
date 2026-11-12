@@ -1007,6 +1007,11 @@ pub struct UiConfig {
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
+    /// Agents whose finished state stays quiet: no toast, no sound, and no
+    /// done highlight or attention entry. Entries match the agent name set
+    /// with `herdr agent rename`; prefix an entry with `re:` to match a
+    /// regular expression. Blocked agents still notify. Default: empty.
+    pub muted_agents: Vec<String>,
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -1230,6 +1235,7 @@ impl Default for UiConfig {
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
+            muted_agents: Vec::new(),
         }
     }
 }

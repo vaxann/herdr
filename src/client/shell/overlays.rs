@@ -41,6 +41,7 @@ pub(crate) fn render_client_overlay(
     active_endpoint_id: &ClientEndpointId,
     k: &LiveKeybindConfig,
     p: &Palette,
+    muted: &crate::config::AgentMuteRules,
 ) -> Option<OverlayRender> {
     if !matches!(
         o,
@@ -65,7 +66,7 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, p),
         ClientShellOverlay::Navigator(v) => {
-            render_navigator_overlay(b, v, endpoints, active_endpoint_id, p)
+            render_navigator_overlay(b, v, endpoints, active_endpoint_id, p, muted)
         }
         ClientShellOverlay::Settings(v) => {
             settings_overlay::render_settings_overlay(b, v, s.integration_updates_available, p)
@@ -707,6 +708,7 @@ fn render_navigator_overlay(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     p: &Palette,
+    muted: &crate::config::AgentMuteRules,
 ) -> Option<OverlayRender> {
     let a = b.area;
     let width = a.width.saturating_sub(4).min(116);
@@ -877,7 +879,34 @@ fn render_navigator_overlay(
         let current = if r.current { "◆ " } else { "" };
         let status = r.status.map(status_dot).unwrap_or_default();
         let status_separator = if status.is_empty() { "" } else { " " };
-        let label = format!("{indent}{current}{status}{status_separator}{}", r.label);
+        let muted_marker = match &r.target {
+            ClientNavigatorTarget::Pane {
+                endpoint_id,
+                pane_id,
+            } if !muted.is_empty() => {
+                let name = endpoints
+                    .iter()
+                    .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+                    .and_then(|endpoint| endpoint.snapshot.as_deref())
+                    .and_then(|snapshot| {
+                        snapshot
+                            .agents
+                            .iter()
+                            .find(|agent| &agent.pane_id == pane_id)
+                    })
+                    .and_then(|agent| agent.name.as_deref());
+                if muted.matches(name) {
+                    " ⊘"
+                } else {
+                    ""
+                }
+            }
+            _ => "",
+        };
+        let label = format!(
+            "{indent}{current}{status}{status_separator}{}{muted_marker}",
+            r.label
+        );
         let st = if r.status.is_none() {
             st.add_modifier(Modifier::BOLD)
         } else {

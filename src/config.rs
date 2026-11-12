@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
+mod agent_mute;
 mod io;
 mod keybinds;
 mod model;
@@ -41,6 +42,7 @@ pub use self::{
 pub(crate) use self::keybinds::parse_key_combo;
 pub(crate) use self::write::{update_file_at, write_edit, ConfigEdit};
 pub(crate) use self::{
+    agent_mute::{muted_agents_diagnostics, AgentMuteRules},
     io::upsert_top_level_bool,
     tab_bar::{
         parse_tab_bar_datetime_format, tab_bar_right_diagnostics,
@@ -119,6 +121,7 @@ impl Config {
             .chain(self.remote_image_paste_key().err())
             .chain(self.theme.diagnostics())
             .chain(self.ui.sound.diagnostics())
+            .chain(muted_agents_diagnostics(&self.ui.muted_agents))
             .chain(tab_bar_right_diagnostics(&self.ui.tab_bar_right))
             .chain(window_title_diagnostics(&self.ui.window_title))
             .chain(self.invalid_sidebar_bounds_diagnostic())

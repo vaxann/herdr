@@ -906,6 +906,12 @@
           "description": "Terminal width at or below which Herdr uses the mobile single-column layout."
         },
         {
+          "key": "ui.muted_agents",
+          "type": "list of strings",
+          "default": "[]",
+          "description": "Agents whose finished state stays quiet: no toast, no sound, and no done highlight or attention entry. Entries match the agent name set with `herdr agent rename`; prefix an entry with `re:` to match a regular expression. Blocked agents still notify. Muted agents are marked with ⊘."
+        },
+        {
           "key": "ui.mouse_capture",
           "type": "boolean",
           "default": "true",

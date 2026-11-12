@@ -340,6 +340,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # distinct static glyphs for blocked, working, done, idle, and unknown states.
 # status_indicators = "dots"
 
+# Agents that stay quiet when they finish: no toast, no sound, and no done highlight.
+# Entries match names set with `herdr agent rename`; prefix with "re:" for a regex.
+# Blocked agents still notify. Muted agents are marked with ⊘.
+# muted_agents = ["daily-report", "re:^cron-"]
+
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"

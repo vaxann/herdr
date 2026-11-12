@@ -713,6 +713,9 @@ fn mobile_items(
                     }),
             );
             detail.push(agent_label.to_owned());
+            if config.muted_agents.matches(agent.name.as_deref()) {
+                detail.push("⊘ muted".to_owned());
+            }
             if endpoint.stale() {
                 detail.push(mobile_endpoint_state(endpoint.status).to_owned());
             }

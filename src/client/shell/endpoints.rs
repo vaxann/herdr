@@ -322,6 +322,27 @@ impl ClientShellState {
             .map(|snapshot| (snapshot.boot_id.as_str(), snapshot.revision))
     }
 
+    /// Re-applies agent presentation (seen completions and `ui.muted_agents`)
+    /// to every cached endpoint snapshot after a config change.
+    pub(super) fn reproject_agent_presentation(&mut self) {
+        for endpoint in &mut self.endpoints {
+            if let Some(snapshot) = endpoint.snapshot.as_deref_mut() {
+                endpoint
+                    .agent_presentation
+                    .reproject_snapshot(snapshot, &self.config.muted_agents);
+            }
+        }
+        if let Some(endpoint) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+        {
+            if endpoint.snapshot.is_some() {
+                self.snapshot = endpoint.snapshot.clone();
+            }
+        }
+    }
+
     pub(crate) fn set_endpoint_agent_completions(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -576,7 +597,7 @@ impl ClientShellState {
         }
         self.endpoints[index]
             .agent_presentation
-            .project_snapshot_for_generation(&mut snapshot, generation);
+            .project_snapshot_for_generation(&mut snapshot, generation, &self.config.muted_agents);
         let presented_surface = if acknowledge_surface && endpoint_id == &self.active_endpoint_id {
             self.pane_surface.as_ref()
         } else {
@@ -585,7 +606,12 @@ impl ClientShellState {
         if let Some(surface) = presented_surface {
             self.endpoints[index]
                 .agent_presentation
-                .acknowledge_surface(&mut snapshot, surface, self.outer_focused);
+                .acknowledge_surface(
+                    &mut snapshot,
+                    surface,
+                    self.outer_focused,
+                    &self.config.muted_agents,
+                );
         }
         let previous = self.endpoints[index].snapshot.as_deref();
         let mut next_recency = self
@@ -666,9 +692,12 @@ impl ClientShellState {
             let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
                 return false;
             };
-            endpoint
-                .agent_presentation
-                .acknowledge_surface(snapshot, surface, self.outer_focused)
+            endpoint.agent_presentation.acknowledge_surface(
+                snapshot,
+                surface,
+                self.outer_focused,
+                &self.config.muted_agents,
+            )
         };
         if changed {
             self.snapshot = self.endpoints[index].snapshot.clone();

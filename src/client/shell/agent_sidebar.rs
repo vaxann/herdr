@@ -14,6 +14,8 @@ pub(super) struct AgentRow {
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
+    /// Matches `ui.muted_agents`; rendered with a trailing `⊘`.
+    pub(super) muted: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
 }
 
@@ -314,6 +316,7 @@ pub(super) fn agent_row(
         pane_id: agent.pane_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
+        muted: config.muted_agents.matches(agent.name.as_deref()),
         rows,
     })
 }
@@ -353,8 +356,11 @@ pub(super) fn render_agent_row(
     } else {
         row.rows.clone()
     };
+    const MUTED_MARKER: &str = " ⊘";
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
+        let marker = row.muted && index == 0 && rect.width > 2 + indent as u16;
+        let marker_width = if marker { 2 } else { 0 };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
@@ -364,12 +370,22 @@ pub(super) fn render_agent_row(
             secondary,
             secondary,
             palette,
-            rect.width.saturating_sub(indent as u16) as usize,
+            rect.width.saturating_sub(indent as u16 + marker_width) as usize,
         ));
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
             buffer,
         );
+        if marker {
+            put_text(
+                buffer,
+                rect.right().saturating_sub(marker_width),
+                rect.y + index as u16,
+                marker_width,
+                MUTED_MARKER,
+                row_style.fg(palette.overlay0),
+            );
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::api::schema::AgentStatus;
+use crate::config::AgentMuteRules;
 use crate::protocol::{ClientShellAgent, ClientShellSnapshot, PaneSurfaceFrame};
 
 #[derive(Clone, Debug, Default)]
@@ -37,13 +38,14 @@ impl EndpointAgentPresentation {
 
     #[cfg(test)]
     pub(super) fn project_snapshot(&mut self, snapshot: &mut ClientShellSnapshot) {
-        self.project_snapshot_for_generation(snapshot, None);
+        self.project_snapshot_for_generation(snapshot, None, &AgentMuteRules::default());
     }
 
     pub(super) fn project_snapshot_for_generation(
         &mut self,
         snapshot: &mut ClientShellSnapshot,
         generation: Option<u64>,
+        muted: &AgentMuteRules,
     ) {
         if self.boot_id.as_deref() != Some(snapshot.boot_id.as_str()) {
             self.boot_id = Some(snapshot.boot_id.clone());
@@ -110,7 +112,21 @@ impl EndpointAgentPresentation {
                     self.completed.remove(&agent.pane_id);
                 }
             }
-            agent.agent_status = self.projected_status(agent);
+            agent.agent_status = self.projected_status(agent, muted);
+        }
+        project_aggregate_status(snapshot);
+    }
+
+    /// Re-applies the presentation to an already projected snapshot, for
+    /// example after `ui.muted_agents` changed. Projected `Idle`/`Done` are
+    /// recomputed from the completion bookkeeping, so this is idempotent.
+    pub(super) fn reproject_snapshot(
+        &self,
+        snapshot: &mut ClientShellSnapshot,
+        muted: &AgentMuteRules,
+    ) {
+        for agent in &mut snapshot.agents {
+            agent.agent_status = self.projected_status(agent, muted);
         }
         project_aggregate_status(snapshot);
     }
@@ -120,6 +136,7 @@ impl EndpointAgentPresentation {
         snapshot: &mut ClientShellSnapshot,
         surface: &PaneSurfaceFrame,
         outer_focused: Option<bool>,
+        muted: &AgentMuteRules,
     ) -> bool {
         if outer_focused == Some(false)
             || self.boot_id.as_deref() != Some(surface.boot_id.as_str())
@@ -146,7 +163,7 @@ impl EndpointAgentPresentation {
         }
         if changed {
             for agent in &mut snapshot.agents {
-                agent.agent_status = self.projected_status(agent);
+                agent.agent_status = self.projected_status(agent, muted);
             }
             project_aggregate_status(snapshot);
         }
@@ -161,10 +178,13 @@ impl EndpointAgentPresentation {
         })
     }
 
-    fn projected_status(&self, agent: &ClientShellAgent) -> AgentStatus {
+    /// A muted agent's completion never asks for attention: it projects as
+    /// `Idle`, which also keeps notification validation from accepting its
+    /// `Finished` events. `Blocked` is never muted.
+    fn projected_status(&self, agent: &ClientShellAgent, muted: &AgentMuteRules) -> AgentStatus {
         match agent.agent_status {
             AgentStatus::Idle | AgentStatus::Done => {
-                if self.seen(agent) {
+                if self.seen(agent) || muted.matches(agent.name.as_deref()) {
                     AgentStatus::Idle
                 } else {
                     AgentStatus::Done
@@ -386,11 +406,19 @@ mod tests {
         ] {
             let mut presentation = EndpointAgentPresentation::default();
             let mut baseline = snapshot(AgentStatus::Idle, 4, 1);
-            presentation.project_snapshot_for_generation(&mut baseline, Some(1));
+            presentation.project_snapshot_for_generation(
+                &mut baseline,
+                Some(1),
+                &AgentMuteRules::default(),
+            );
             presentation.receive_completions(generation, completions(boot, revision, Some(seq)));
             let mut settled = snapshot(AgentStatus::Idle, 6, 2);
 
-            presentation.project_snapshot_for_generation(&mut settled, Some(1));
+            presentation.project_snapshot_for_generation(
+                &mut settled,
+                Some(1),
+                &AgentMuteRules::default(),
+            );
 
             assert_eq!(settled.agents[0].agent_status, AgentStatus::Idle);
         }
@@ -430,7 +458,12 @@ mod tests {
         let mut completed = snapshot(AgentStatus::Idle, 5, 2);
         presentation.project_snapshot(&mut completed);
 
-        assert!(presentation.acknowledge_surface(&mut completed, &surface(2), Some(true)));
+        assert!(presentation.acknowledge_surface(
+            &mut completed,
+            &surface(2),
+            Some(true),
+            &AgentMuteRules::default()
+        ));
         assert_eq!(completed.agents[0].agent_status, AgentStatus::Idle);
     }
 
@@ -450,7 +483,8 @@ mod tests {
         assert!(viewing_client.acknowledge_surface(
             &mut completed_for_viewer,
             &surface(2),
-            Some(true)
+            Some(true),
+            &AgentMuteRules::default(),
         ));
 
         assert_eq!(
@@ -471,8 +505,18 @@ mod tests {
         let mut completed = snapshot(AgentStatus::Idle, 5, 2);
         presentation.project_snapshot(&mut completed);
 
-        assert!(!presentation.acknowledge_surface(&mut completed, &surface(1), Some(true)));
-        assert!(!presentation.acknowledge_surface(&mut completed, &surface(2), Some(false)));
+        assert!(!presentation.acknowledge_surface(
+            &mut completed,
+            &surface(1),
+            Some(true),
+            &AgentMuteRules::default()
+        ));
+        assert!(!presentation.acknowledge_surface(
+            &mut completed,
+            &surface(2),
+            Some(false),
+            &AgentMuteRules::default()
+        ));
         assert_eq!(completed.agents[0].agent_status, AgentStatus::Done);
     }
 }
