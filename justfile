@@ -88,6 +88,12 @@ build:
 build:
     python scripts/package_windows_conpty.py build-local
 
+# Fork release build: reports `<cargo version>-ivan.<build>` (e.g. 0.9.5-ivan.1)
+# while Cargo.toml keeps the upstream semver that update checks parse.
+[unix]
+build-fork build='1':
+    HERDR_BUILD_CHANNEL=ivan HERDR_BUILD_ID={{build}} cargo build --release --locked
+
 # Non-gating full-render scaling profile for background workspaces and active panes
 bench-render-scale:
     cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
